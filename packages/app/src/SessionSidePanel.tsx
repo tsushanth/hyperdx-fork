@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { useQueryState } from 'nuqs';
 import { ErrorBoundary } from 'react-error-boundary';
 import { useHotkeys } from 'react-hotkeys-hook';
@@ -53,6 +53,7 @@ import styles from '@/../styles/LogSidePanel.module.scss';
 type SelectedEvent = {
   rowId: string;
   aliasWith: WithClause[];
+  sessionId: string;
 };
 
 export default function SessionSidePanel({
@@ -81,10 +82,15 @@ export default function SessionSidePanel({
   // survives reload and shared links. Deeper navigation (View Trace,
   // surrounding context) is handled by `DBRowSidePanelInner`, which persists
   // its own state to the shared `sidePanel*` params below.
-  const [selectedEvent, setSelectedEvent] = useQueryState(
+  const [persistedEvent, setSelectedEvent] = useQueryState(
     'sessionPanelEvent',
     parseAsJsonEncoded<SelectedEvent>(),
   );
+
+  const selectedEvent =
+    persistedEvent != null && persistedEvent.sessionId === sessionId
+      ? persistedEvent
+      : null;
 
   // The embedded `DBRowSidePanelInner` owns these shared params. We clear them
   // whenever the session-level selection changes so a stale inner stack can't
@@ -92,6 +98,7 @@ export default function SessionSidePanel({
   const [, setSourceStackParam] = useQueryState('sidePanelSourceStack');
   const [, setNavStackParam] = useQueryState('sidePanelNavStack');
   const [, setSidePanelTab] = useQueryState('sidePanelTab');
+  const [, setStackRootParam] = useQueryState('sidePanelStackRoot');
 
   const { size, setSize, startResize } = useResizable(
     INITIAL_DRAWER_WIDTH_PERCENT,
@@ -107,7 +114,22 @@ export default function SessionSidePanel({
     setSourceStackParam(null);
     setNavStackParam(null);
     setSidePanelTab(null);
-  }, [setSourceStackParam, setNavStackParam, setSidePanelTab]);
+    setStackRootParam(null);
+  }, [
+    setSourceStackParam,
+    setNavStackParam,
+    setSidePanelTab,
+    setStackRootParam,
+  ]);
+
+  // Evict a persisted event that belongs to a different session from the URL so
+  // a stale link can't linger after switching sessions.
+  useEffect(() => {
+    if (persistedEvent != null && persistedEvent.sessionId !== sessionId) {
+      setSelectedEvent(null);
+      clearInnerNavigation();
+    }
+  }, [persistedEvent, sessionId, setSelectedEvent, clearInnerNavigation]);
 
   const handleBackToSession = useCallback(() => {
     setSelectedEvent(null);
@@ -117,9 +139,9 @@ export default function SessionSidePanel({
   const handleEventNavigate = useCallback(
     (rowId: string, aliasWith: WithClause[]) => {
       clearInnerNavigation();
-      setSelectedEvent({ rowId, aliasWith });
+      setSelectedEvent({ rowId, aliasWith, sessionId });
     },
-    [setSelectedEvent, clearInnerNavigation],
+    [setSelectedEvent, clearInnerNavigation, sessionId],
   );
 
   // X / Esc-at-root closes the whole panel and clears the session-panel params.

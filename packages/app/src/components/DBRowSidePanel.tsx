@@ -47,7 +47,7 @@ import { SearchConfig } from '@/types';
 import { FormatTime } from '@/useFormatTime';
 import { formatDistanceToNowStrictShort } from '@/utils';
 import { getHighlightedAttributesFromData } from '@/utils/highlightedAttributes';
-import { parseAsJsonEncoded } from '@/utils/queryParsers';
+import { parseAsJsonEncoded, parseAsStringEncoded } from '@/utils/queryParsers';
 import { useZIndex, ZIndexContext } from '@/zIndex';
 
 import ServiceMapSidePanel from './ServiceMap/ServiceMapSidePanel';
@@ -262,8 +262,23 @@ export const DBRowSidePanelInner = ({
     parseAsJsonEncoded<NavEntry[]>().withDefault(EMPTY_NAV_STACK),
   );
 
+  // Records the root row id that the current stacks were built from, so a
+  // freshly mounted panel can tell a genuine deep-link (stacks belong to
+  // `initialRowId`) apart from stale leftovers (stacks belong to a previous
+  // root that survived an unclosed-drawer / cross-table / route-change path).
+  const [stackRoot, setStackRoot] = useQueryState(
+    'sidePanelStackRoot',
+    parseAsStringEncoded,
+  );
+
+  const hasStacks = sourceStack.length > 0 || navStack.length > 0;
+  const stacksAreStale =
+    hasStacks && stackRoot != null && stackRoot !== initialRowId;
+
   const activeSourceFrame =
-    sourceStack.length > 0 ? sourceStack[sourceStack.length - 1] : null;
+    !stacksAreStale && sourceStack.length > 0
+      ? sourceStack[sourceStack.length - 1]
+      : null;
 
   // Resolve the leaf source (cross-source navigation). Intermediate frames only
   // need their stored label/kind for breadcrumbs.
@@ -277,7 +292,10 @@ export const DBRowSidePanelInner = ({
   const baseRowId = activeSourceFrame?.rowId ?? initialRowId;
   const baseAliasWith = activeSourceFrame?.aliasWith ?? initialAliasWith;
 
-  const leafNav = navStack.length > 0 ? navStack[navStack.length - 1] : null;
+  const leafNav =
+    !stacksAreStale && navStack.length > 0
+      ? navStack[navStack.length - 1]
+      : null;
   const resolvedRowId = leafNav?.rowId ?? baseRowId;
   const resolvedAliasWith = leafNav?.aliasWith ?? baseAliasWith;
 
@@ -297,12 +315,13 @@ export const DBRowSidePanelInner = ({
     aliasWith: activeAliasWith,
   });
 
+  const hasActiveStacks = activeSourceFrame != null || leafNav != null;
+
   const parentContext = useContext(RowSidePanelContext);
   // Nested rows shouldn't inherit the parent table's row config.
-  const dbSqlRowTableConfig =
-    sourceStack.length > 0 || navStack.length > 0
-      ? undefined
-      : parentContext.dbSqlRowTableConfig;
+  const dbSqlRowTableConfig = hasActiveStacks
+    ? undefined
+    : parentContext.dbSqlRowTableConfig;
 
   const hasOverviewPanel = useMemo(() => {
     if (isLogSource(source) || isTraceSource(source)) {
@@ -343,20 +362,23 @@ export const DBRowSidePanelInner = ({
       label: string,
       sourceKind?: SourceKind,
     ) => {
+      setStackRoot(initialRowId ?? null);
       setNavStack(prev => [
         ...prev,
         { rowId, aliasWith, label, sourceKind, originTab: queryTab },
       ]);
     },
-    [setNavStack, queryTab],
+    [setNavStack, setStackRoot, initialRowId, queryTab],
   );
 
   const handleSourceStackPush = useCallback(
     (frame: SourceFrame) => {
+      // Record which root row owns the growing stack (see handleNavigateToRow).
+      setStackRoot(initialRowId ?? null);
       setSourceStack(prev => [...prev, { ...frame, originTab: queryTab }]);
       setNavStack([]);
     },
-    [setSourceStack, setNavStack, queryTab],
+    [setSourceStack, setNavStack, setStackRoot, initialRowId, queryTab],
   );
 
   const handlePanelBack = useCallback(() => {
@@ -447,20 +469,14 @@ export const DBRowSidePanelInner = ({
     prevNavStackLengthRef.current = navStack.length;
   }, [sourceStack, navStack, setQueryTab, sourceIsTrace, hasOverviewPanel]);
 
-  // Reset to the default tab and clear drilldowns when a *different* root event
-  // is opened. Seeded with the first-render rowId so a genuine deep-link (rowId
-  // + stacks both restored from the URL) is preserved, while a later change of
-  // the *root* rowId (e.g. undefined → clicked row, or switching to a different
-  // event) clears stale drilldown stacks.
-  const prevInitialRowIdRef = useRef<string | undefined | null>(initialRowId);
   useEffect(() => {
-    if (initialRowId !== prevInitialRowIdRef.current) {
-      setSourceStack([]);
-      setNavStack([]);
+    if (stacksAreStale) {
+      setSourceStack(null);
+      setNavStack(null);
       setQueryTab(null);
+      setStackRoot(null);
     }
-    prevInitialRowIdRef.current = initialRowId;
-  }, [initialRowId, setSourceStack, setNavStack, setQueryTab]);
+  }, [stacksAreStale, setSourceStack, setNavStack, setQueryTab, setStackRoot]);
 
   const displayedTab = queryTab;
   const setTab = setQueryTab;
@@ -490,16 +506,11 @@ export const DBRowSidePanelInner = ({
   >(undefined);
 
   useEffect(() => {
-    if (
-      mainContent != null &&
-      initialMainContent == null &&
-      sourceStack.length === 0 &&
-      navStack.length === 0
-    ) {
+    if (mainContent != null && initialMainContent == null && !hasActiveStacks) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setInitialMainContent(mainContent);
     }
-  }, [mainContent, initialMainContent, sourceStack.length, navStack.length]);
+  }, [mainContent, initialMainContent, hasActiveStacks]);
 
   const highlightedAttributeValues = useMemo(() => {
     const attributeExpressions: NonNullable<
@@ -658,7 +669,11 @@ export const DBRowSidePanelInner = ({
       items.push(...parentBreadcrumbs);
     }
 
-    const hasStack = sourceStack.length > 0 || navStack.length > 0;
+    // Ignore stale stacks so the trail collapses to the root row in the same
+    // render the row content does (the URL clear lands a tick later).
+    const crumbSourceStack = stacksAreStale ? EMPTY_SOURCE_STACK : sourceStack;
+    const crumbNavStack = stacksAreStale ? EMPTY_NAV_STACK : navStack;
+    const hasStack = crumbSourceStack.length > 0 || crumbNavStack.length > 0;
     const rootLabel =
       initialMainContent ||
       (rootSource.kind === SourceKind.Trace ? 'Trace' : 'Log');
@@ -671,9 +686,9 @@ export const DBRowSidePanelInner = ({
       });
     }
 
-    sourceStack.forEach((entry, i) => {
-      const isLeafSource = i === sourceStack.length - 1;
-      const isCurrent = isLeafSource && navStack.length === 0;
+    crumbSourceStack.forEach((entry, i) => {
+      const isLeafSource = i === crumbSourceStack.length - 1;
+      const isCurrent = isLeafSource && crumbNavStack.length === 0;
       items.push({
         label: entry.label,
         sourceKind: entry.sourceKind,
@@ -683,14 +698,14 @@ export const DBRowSidePanelInner = ({
       });
     });
 
-    navStack.forEach((entry, i) => {
-      const isCurrent = i === navStack.length - 1;
+    crumbNavStack.forEach((entry, i) => {
+      const isCurrent = i === crumbNavStack.length - 1;
       items.push({
         label: entry.label,
         sourceKind: entry.sourceKind,
         onClick: isCurrent
           ? undefined
-          : () => handleBreadcrumbNavigation(sourceStack.length, i + 1),
+          : () => handleBreadcrumbNavigation(crumbSourceStack.length, i + 1),
       });
     });
 
@@ -705,6 +720,7 @@ export const DBRowSidePanelInner = ({
   }, [
     sourceStack,
     navStack,
+    stacksAreStale,
     rootSource.kind,
     sourceIsTrace,
     mainContent,
@@ -1112,6 +1128,10 @@ export default function DBRowSidePanelErrorBoundary({
     'sidePanelNavStack',
     parseAsJsonEncoded<NavEntry[]>(),
   );
+  const [, setStackRootParam] = useQueryState(
+    'sidePanelStackRoot',
+    parseAsStringEncoded,
+  );
 
   const { clear: clearTraceWaterfallSearchState } = useWaterfallSearchState({});
 
@@ -1120,6 +1140,7 @@ export default function DBRowSidePanelErrorBoundary({
     setSidePanelTab(null);
     setSourceStackParam(null);
     setNavStackParam(null);
+    setStackRootParam(null);
     // Clear waterfall search state on close, so that filters don't
     // persist when reopening another trace.
     clearTraceWaterfallSearchState();
@@ -1128,6 +1149,7 @@ export default function DBRowSidePanelErrorBoundary({
     setSidePanelTab,
     setSourceStackParam,
     setNavStackParam,
+    setStackRootParam,
     onClose,
     clearTraceWaterfallSearchState,
   ]);
